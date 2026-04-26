@@ -1,0 +1,6 @@
+dataset/
+.venv/
+ckpt*/
+submission*/
+**/__pycache__
+*Zone.Identifier
