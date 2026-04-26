@@ -22,7 +22,8 @@ class Generator(nn.Sequential):
             DepthConvBlock(input_nc//4, input_nc//4),
             ResidualBlock(input_nc//4, input_nc//8),
             DepthConvBlock(input_nc//8, input_nc//8),
-            nn.Conv2d(input_nc//8, 3, 1)
+            nn.Conv2d(input_nc//8, 3, 1),
+            nn.Sigmoid(),
         )
         
     def forward(self, input):
@@ -76,8 +77,9 @@ class Gaussian_Predictor(nn.Sequential):
         )
         
     def reparameterize(self, mu, logvar):
-        # TODO
-        raise NotImplementedError
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
 
     def forward(self, img, label):
         feature = torch.cat([img, label], dim=1)

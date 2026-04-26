@@ -1,6 +1,6 @@
-dataset/
-.venv/
-ckpt*/
-submission*/
-**/__pycache__
-*Zone.Identifier
+__pycache__/
+*.pyc
+runs/
+*.Identifier
+*.ckpt
+dataset
