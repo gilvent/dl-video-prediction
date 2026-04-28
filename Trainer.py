@@ -235,7 +235,9 @@ class VAE_Model(nn.Module):
         kl_total = 0.0
         for t in range(1, T):
             label_feat = self.label_transformation(label[t])
-            prev_feat = self.frame_transformation(prev)
+            # Detach gradient on the previous-frame conditioning path so the
+            # encoder is trained only via the posterior's target-frame input.
+            prev_feat = self.frame_transformation(prev).detach()
             target_feat = self.frame_transformation(img[t])
             z, mu, logvar = self.Gaussian_Predictor(target_feat, label_feat)
             fused = self.Decoder_Fusion(prev_feat, label_feat, z)
