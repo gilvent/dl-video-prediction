@@ -1,6 +1,6 @@
-# Lab 4 — Conditional VAE for Video Prediction (Vanilla variant)
+# Lab 4 — Conditional VAE for Video Prediction
 
-Per-frame stochastic CVAE following the spec's Figure 4 (no recurrence beyond the previous-frame conditioning). Branch: `vanilla-cvae`.
+Pose-guided video prediction using CVAE
 
 ## Setup
 
@@ -12,12 +12,12 @@ For RTX 50-series (sm_120), see the Blackwell note at the bottom.
 
 ## Training
 
-Canonical run (GPU-saturating batch on 16 GB):
+### Cyclical KL
 
 ```bash
 python Trainer.py \
     --DR ./dataset \
-    --save_root ./runs/vanilla-cyclical \
+    --save_root ./runs/cyclical-kl \
     --batch_size 8 \
     --train_vi_len 16 \
     --val_vi_len 630 \
@@ -28,8 +28,8 @@ python Trainer.py \
     --lr_min 1e-5 \
     --scheduler cosine \
     --kl_anneal_type Cyclical \
-    --kl_anneal_cycle 10 \
-    --kl_anneal_ratio 0.5 \
+    --kl_anneal_cycle 4 \
+    --kl_anneal_ratio 0.4 \
     --kl_max 1.0 \
     --tfr 1.0 \
     --tfr_sde 10 \
@@ -37,13 +37,52 @@ python Trainer.py \
     --tfr_d_period 6
 ```
 
-Notes on the flags:
+### Monotonic KL
 
-- `--kl_anneal_type {Cyclical,Monotonic,None}` selects the β schedule. Cyclical uses `frange_cycle_linear(num_epoch, n_cycle=kl_anneal_cycle, ratio=kl_anneal_ratio)`; Monotonic linearly ramps 0→1 over `kl_anneal_cycle` epochs and holds; None uses β = 1.
-- `--kl_max 1.0` is appropriate for the vanilla model (KL is against an N(0, I) prior).
-- `--tfr_sde 10 --tfr_d_step 0.1 --tfr_d_period 6`: hold tfr=1.0 for 10 epochs, then drop 0.1 every 6 epochs, reaching 0 at epoch 70. The `--tfr_d_period` flag spreads the TFR decay across the full run instead of crashing it to 0 in 10 epochs — gives the model multiple plateaus to adapt at each TFR level.
-- Optimizer: Adam (with `--weight_decay` opt-in, default 0). Scheduler: cosine 1e-3 → 1e-5 over `num_epoch` (`--scheduler cosine --lr_min 1e-5`); pass `--scheduler multistep` to fall back to MultiStepLR `[2, 5]` × 0.1.
-- `--batch_size 8` is the sweet spot on 16 GB VRAM. Pushing to batch=16 pinned VRAM at 16 GB and triggered allocator thrashing (per-iter time blew up ~30×); batch=8 sits comfortably at ~13 GB and runs ~3 min/epoch.
+```bash
+python Trainer.py \
+    --DR ./dataset \
+    --save_root ./runs/monotonic-kl \
+    --batch_size 8 \
+    --train_vi_len 16 \
+    --val_vi_len 630 \
+    --num_epoch 70 \
+    --num_workers 4 \
+    --per_save 2 \
+    --lr 1e-3 \
+    --lr_min 1e-5 \
+    --scheduler cosine \
+    --kl_anneal_type Monotonic \
+    --kl_anneal_cycle 20 \
+    --kl_max 0.1 \
+    --tfr 1.0 \
+    --tfr_sde 10 \
+    --tfr_d_step 0.1 \
+    --tfr_d_period 6
+```
+
+### Constant β (no annealing)
+
+```bash
+python Trainer.py \
+    --DR ./dataset \
+    --save_root ./runs/no-kl \
+    --batch_size 8 \
+    --train_vi_len 16 \
+    --val_vi_len 630 \
+    --num_epoch 70 \
+    --num_workers 4 \
+    --per_save 2 \
+    --lr 1e-3 \
+    --lr_min 1e-5 \
+    --scheduler cosine \
+    --kl_anneal_type None \
+    --kl_max 0.05 \
+    --tfr 1.0 \
+    --tfr_sde 10 \
+    --tfr_d_step 0.1 \
+    --tfr_d_period 6
+```
 
 ### Resume / fine-tune from a checkpoint
 
@@ -51,8 +90,8 @@ Notes on the flags:
 # Resume exactly (rehydrates optimizer, scheduler, KL annealer, TFR, history)
 python Trainer.py \
     --DR ./dataset \
-    --save_root ./runs/vanilla-cyclical \
-    --ckpt_path ./runs/vanilla-cyclical/epoch=N.ckpt \
+    --save_root ./runs/cyclical-kl \
+    --ckpt_path ./runs/cyclical-kl/epoch=N.ckpt \
     --resume \
     [...same training args as the original run...]
 
@@ -68,19 +107,11 @@ python Trainer.py \
 ```bash
 python Tester.py \
     --DR ./dataset \
-    --save_root ./runs/vanilla-cyclical \
-    --ckpt_path ./runs/vanilla-cyclical/epoch=last.ckpt
+    --save_root ./runs/cyclical-kl \
+    --ckpt_path ./runs/cyclical-kl/epoch=last.ckpt
 ```
 
 Outputs `submission.csv` and per-sequence GIFs (`pred_seq{idx}.gif`) under `--save_root`. The 629-step autoregressive rollout samples z from N(0, I).
-
-## Plots
-
-After training, `--save_root` contains:
-
-- `loss_curve.png` — train (per-frame mean MSE) vs val (per-frame mean MSE)
-- `val_psnr.png`, `psnr_per_frame.png`, `beta_curve.png`, `tfr_curve.png`
-- `history.json` — raw lists for re-plotting
 
 ## Note: Blackwell GPUs (RTX 50-series, sm_120)
 
