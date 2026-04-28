@@ -4,3 +4,4 @@ runs/
 *.Identifier
 *.ckpt
 dataset
+.venv/

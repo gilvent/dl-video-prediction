@@ -99,8 +99,9 @@ class VAE_Model(nn.Module):
         # Generative model
         self.Generator            = Generator(input_nc=args.D_out_dim, output_nc=3)
 
-        self.optim      = optim.Adam(self.parameters(), lr=self.args.lr)
-        self.scheduler  = optim.lr_scheduler.MultiStepLR(self.optim, milestones=[2, 5], gamma=0.1)
+        self.optim      = optim.Adam(self.parameters(), lr=self.args.lr,
+                                     weight_decay=getattr(self.args, 'weight_decay', 0.0))
+        self.scheduler  = self._build_scheduler(remaining_epochs=self.args.num_epoch)
         self.kl_annealing = kl_annealing(args, current_epoch=0)
         self.mse_criterion = nn.MSELoss()
         self.current_epoch = 0
@@ -136,9 +137,9 @@ class VAE_Model(nn.Module):
                 adapt_TeacherForcing = random.random() < self.tfr
                 img = img.to(self.args.device)
                 label = label.to(self.args.device)
-                loss = self.training_one_step(img, label, adapt_TeacherForcing)
+                loss, mse_per_frame = self.training_one_step(img, label, adapt_TeacherForcing)
 
-                epoch_losses.append(float(loss.detach().cpu()))
+                epoch_losses.append(mse_per_frame)
                 beta = self.kl_annealing.get_beta()
                 if adapt_TeacherForcing:
                     self.tqdm_bar('train [TeacherForcing: ON, {:.2f}], beta: {:.4f}'.format(self.tfr, beta), pbar, loss.detach().cpu(), lr=self.scheduler.get_last_lr()[0])
@@ -254,7 +255,8 @@ class VAE_Model(nn.Module):
         self.optim.zero_grad()
         loss.backward()
         self.optimizer_step()
-        return loss
+        mse_per_frame = float(mse_total.detach().cpu()) / max(1, T - 1)
+        return loss, mse_per_frame
 
     @torch.no_grad()
     def val_one_step(self, img, label):
@@ -322,12 +324,22 @@ class VAE_Model(nn.Module):
 
     def teacher_forcing_ratio_update(self):
         if self.current_epoch >= self.tfr_sde:
-            self.tfr = max(0.0, self.tfr - self.tfr_d_step)
+            period = max(1, getattr(self.args, 'tfr_d_period', 1))
+            if (self.current_epoch - self.tfr_sde) % period == 0:
+                self.tfr = max(0.0, self.tfr - self.tfr_d_step)
 
     def tqdm_bar(self, mode, pbar, loss, lr):
         pbar.set_description(f"({mode}) Epoch {self.current_epoch}, lr:{lr}" , refresh=False)
         pbar.set_postfix(loss=float(loss), refresh=False)
         pbar.refresh()
+
+    def _build_scheduler(self, remaining_epochs):
+        sched_type = getattr(self.args, 'scheduler', 'cosine')
+        if sched_type == 'cosine':
+            eta_min = getattr(self.args, 'lr_min', 1e-5)
+            return optim.lr_scheduler.CosineAnnealingLR(
+                self.optim, T_max=max(1, remaining_epochs), eta_min=eta_min)
+        return optim.lr_scheduler.MultiStepLR(self.optim, milestones=[2, 5], gamma=0.1)
 
     def save(self, path):
         torch.save({
@@ -354,15 +366,33 @@ class VAE_Model(nn.Module):
             return
 
         try:
-            self.optim.load_state_dict(checkpoint['optimizer'])
-            self.scheduler.load_state_dict(checkpoint['scheduler'])
             self.kl_annealing.load_state_dict(checkpoint['kl_anneal'])
             self.tfr = checkpoint['tfr']
             self.current_epoch = checkpoint['last_epoch'] + 1
             if 'history' in checkpoint and checkpoint['history']:
                 self.history = checkpoint['history']
             self.last_per_frame_psnr = checkpoint.get('last_per_frame_psnr', None)
-            print(f"Resumed from {self.args.ckpt_path} at epoch {self.current_epoch}")
+
+            reset_optim = getattr(self.args, 'reset_optim', False)
+            if reset_optim:
+                # Rebuild optimizer + scheduler from current args; cover only
+                # the remaining epochs so the LR curve fits the time we have
+                # left. Useful for swapping scheduler shape mid-run or
+                # extending num_epoch.
+                self.optim = optim.Adam(self.parameters(), lr=self.args.lr,
+                                        weight_decay=getattr(self.args, 'weight_decay', 0.0))
+                remaining = max(1, self.args.num_epoch - self.current_epoch)
+                self.scheduler = self._build_scheduler(remaining_epochs=remaining)
+                print(f"Resumed weights+history from {self.args.ckpt_path} at epoch {self.current_epoch}; "
+                      f"optimizer/scheduler reset (remaining={remaining}, lr={self.args.lr})")
+            else:
+                self.optim.load_state_dict(checkpoint['optimizer'])
+                self.scheduler.load_state_dict(checkpoint['scheduler'])
+                # save() runs before scheduler.step() in training_stage, so the
+                # checkpointed scheduler is one step behind. Advance once so
+                # the resumed epoch trains with the correct LR.
+                self.scheduler.step()
+                print(f"Resumed from {self.args.ckpt_path} at epoch {self.current_epoch}")
         except KeyError as e:
             print(f"Warning: checkpoint missing key {e}; falling back to weights-only load")
 
@@ -383,7 +413,8 @@ class VAE_Model(nn.Module):
         plt.plot(epochs, h['train_loss'], label='train')
         if h['val_loss']:
             plt.plot(list(range(len(h['val_loss']))), h['val_loss'], label='val')
-        plt.xlabel('epoch'); plt.ylabel('loss'); plt.legend(); plt.title('Loss curve')
+        plt.xlabel('epoch'); plt.ylabel('mean per-frame MSE'); plt.yscale('log')
+        plt.legend(); plt.grid(alpha=0.3); plt.title('Loss curve')
         plt.savefig(os.path.join(save_root, 'loss_curve.png'), bbox_inches='tight')
         plt.close()
 
@@ -460,8 +491,10 @@ if __name__ == '__main__':
     parser.add_argument('--tfr',           type=float, default=1.0,  help="The initial teacher forcing ratio")
     parser.add_argument('--tfr_sde',       type=int,   default=10,   help="The epoch that teacher forcing ratio start to decay")
     parser.add_argument('--tfr_d_step',    type=float, default=0.1,  help="Decay step that teacher forcing ratio adopted")
+    parser.add_argument('--tfr_d_period',  type=int,   default=1,    help="Apply tfr_d_step every N epochs after tfr_sde (1 = every epoch)")
     parser.add_argument('--ckpt_path',     type=str,    default=None,help="The path of your checkpoints")
     parser.add_argument('--resume',        action='store_true',      help="Resume optimizer/scheduler/history from --ckpt_path")
+    parser.add_argument('--reset_optim',   action='store_true',      help="With --resume: reload weights+history but rebuild optimizer & scheduler from current args (covers remaining epochs only)")
 
     # Training Strategy
     parser.add_argument('--fast_train',         action='store_true')
@@ -473,6 +506,11 @@ if __name__ == '__main__':
     parser.add_argument('--kl_anneal_cycle',    type=int, default=10,               help="")
     parser.add_argument('--kl_anneal_ratio',    type=float, default=0.5,            help="Fraction of each cycle spent ramping (Cyclical only)")
     parser.add_argument('--kl_max',             type=float, default=1.0,            help="Peak beta value of the schedule")
+
+    # Optimizer / scheduler
+    parser.add_argument('--scheduler',          type=str, default='cosine', choices=['cosine', 'multistep'])
+    parser.add_argument('--lr_min',             type=float, default=1e-5,           help="Minimum LR for cosine schedule")
+    parser.add_argument('--weight_decay',       type=float, default=0.0,            help="Adam weight decay")
 
     args = parser.parse_args()
 
