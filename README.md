@@ -8,7 +8,7 @@ Pose-guided video prediction using CVAE
 pip install -r requirements.txt
 ```
 
-For RTX 50-series (sm_120), see the Blackwell note at the bottom.
+There is PyTorch and CUDA incompatiblity issue when using RTX 50-series (sm_120), see the notes at the bottom.
 
 ## Training
 
@@ -87,7 +87,7 @@ python Trainer.py \
 ### Resume / fine-tune from a checkpoint
 
 ```bash
-# Resume exactly (rehydrates optimizer, scheduler, KL annealer, TFR, history)
+# Resume exactly (with optimizer, scheduler, KL annealer, TFR, history)
 python Trainer.py \
     --DR ./dataset \
     --save_root ./runs/cyclical-kl \
@@ -95,12 +95,8 @@ python Trainer.py \
     --resume \
     [...same training args as the original run...]
 
-# Resume weights/history but rebuild optimizer + scheduler from current args
-python Trainer.py \
-    [...same as above...] --resume --reset_optim
-```
 
-`--ckpt_path` without `--resume` does **weights-only** restore (warm-start a new experiment from old weights; optimizer + history start fresh).
+`--ckpt_path` without `--resume` does **weights-only** restore (warm-start a new experiment from old weights; optimizer + visualization curves start fresh).
 
 ## Testing
 
@@ -111,7 +107,7 @@ python Tester.py \
     --ckpt_path ./runs/cyclical-kl/epoch=last.ckpt
 ```
 
-Outputs `submission.csv` and per-sequence GIFs (`pred_seq{idx}.gif`) under `--save_root`. The 629-step autoregressive rollout samples z from N(0, I).
+Outputs `submission.csv` and per-sequence GIFs (`pred_seq{idx}.gif`) under `--save_root`.
 
 ## Note: Blackwell GPUs (RTX 50-series, sm_120)
 
